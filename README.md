@@ -134,6 +134,30 @@ On systems where CPU and GPU share a unified memory pool, other large models (e.
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `MODEL_NAME` | `small-sfx` | Model variant to load |
+| `IDLE_TIMEOUT` | `300` | Seconds of inactivity before unloading the model from GPU. Set to `0` to disable. |
+
+### Idle sleep
+
+When `IDLE_TIMEOUT` is set (default 5 minutes), a background task monitors inactivity and unloads the model weights from GPU memory after the timeout, freeing VRAM for other processes. The model reloads automatically on the next request (~8s cold start).
+
+The `/health` endpoint reports current state:
+
+```json
+{"status": "ok", "model": "small-sfx", "device": "cuda", "loaded": false, "idle_seconds": 342, "idle_timeout": 300}
+```
+
+To override at runtime:
+
+```bash
+IDLE_TIMEOUT=600 .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765  # 10 min
+IDLE_TIMEOUT=0   .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765  # never unload
+```
+
+Or in the systemd unit:
+
+```ini
+Environment=IDLE_TIMEOUT=600
+```
 
 ## Performance
 
