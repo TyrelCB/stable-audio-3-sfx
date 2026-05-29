@@ -5,8 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/projects/stable-audio-3-sfx
-ExecStartPre=/bin/sleep 5
-ExecStart=%h/projects/stable-audio-3-sfx/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765
+ExecStart=%h/projects/stable-audio-3-sfx/.venv/bin/python %h/projects/stable-audio-3-sfx/main.py
 Restart=on-failure
 RestartSec=15
 StartLimitIntervalSec=120

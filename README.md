@@ -1,6 +1,6 @@
 # stable-audio-3-sfx
 
-A minimal FastAPI service that generates sound effects using [Stable Audio 3 Small SFX](https://huggingface.co/stabilityai/stable-audio-3-small-sfx) — a 0.6B-parameter latent diffusion model from Stability AI. Generates stereo 44.1 kHz WAV files from text prompts in under a second on GPU.
+A Gradio service that generates sound effects using [Stable Audio 3 Small SFX](https://huggingface.co/stabilityai/stable-audio-3-small-sfx) — a 0.6B-parameter latent diffusion model from Stability AI. Includes a web UI, a REST health endpoint, and an MCP server so AI agents can generate sound effects as a tool call.
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ uv pip install --python .venv/bin/python --no-deps git+https://github.com/Stabil
 uv pip install --python .venv/bin/python \
   einops einops-exts soundfile safetensors \
   huggingface-hub transformers tqdm numpy packaging \
-  fastapi uvicorn pydantic
+  gradio
 
 # 5. Log in to Hugging Face (one-time)
 huggingface-cli login
@@ -37,75 +37,58 @@ huggingface-cli login
 ## Running
 
 ```bash
-.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765
+.venv/bin/python main.py
 ```
 
-The model downloads and loads into GPU memory on first startup (~3.4 GB, cached to `~/.cache/huggingface` afterward).
+The model downloads and loads into GPU memory on first startup (~3.4 GB, cached to `~/.cache/huggingface` afterward). Open **http://localhost:8765** for the UI.
 
-## API
+## Web UI
 
-### `GET /health`
+The Gradio interface at `http://localhost:8765` provides:
+- Prompt text input
+- Duration and Steps sliders
+- Advanced controls (CFG scale, seed, negative prompt)
+- Inline audio player with download
+
+## MCP Server
+
+The service exposes a `generate_sfx` MCP tool at:
+
+```
+http://localhost:8765/gradio_api/mcp/sse
+```
+
+### Connecting from Claude Desktop
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "stable-audio-sfx": {
+      "url": "http://localhost:8765/gradio_api/mcp/sse"
+    }
+  }
+}
+```
+
+### Connecting from any MCP client
+
+The tool schema is available at:
+```bash
+curl http://localhost:8765/gradio_api/mcp/schema | python3 -m json.tool
+```
+
+The `generate_sfx` tool accepts: `prompt`, `duration`, `steps`, `cfg_scale`, `seed`, `negative_prompt`.
+
+## Health endpoint
 
 ```bash
 curl http://localhost:8765/health
 ```
 
 ```json
-{"status": "ok", "model": "small-sfx", "device": "cuda"}
-```
-
-### `POST /generate`
-
-Returns a WAV file.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `prompt` | string | **required** | Text description of the sound |
-| `duration` | float | `5.0` | Length in seconds (max 60) |
-| `steps` | int | `8` | Diffusion steps — more = higher quality, slower |
-| `cfg_scale` | float | `1.0` | Classifier-free guidance scale |
-| `seed` | int | `-1` | Random seed (-1 = random) |
-| `negative_prompt` | string | `""` | What to avoid in the output |
-
-```bash
-curl -X POST http://localhost:8765/generate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "thunder clap with distant rumble", "duration": 5}' \
-  --output thunder.wav
-```
-
-## Examples
-
-```bash
-# Thunder
-curl -X POST http://localhost:8765/generate \
-  -d '{"prompt": "thunder clap with distant rumble", "duration": 5}' \
-  -H "Content-Type: application/json" --output thunder.wav
-
-# Gunshot
-curl -X POST http://localhost:8765/generate \
-  -d '{"prompt": "single gunshot with echo", "duration": 3}' \
-  -H "Content-Type: application/json" --output gunshot.wav
-
-# Explosion
-curl -X POST http://localhost:8765/generate \
-  -d '{"prompt": "large explosion with deep rumbling shockwave", "duration": 5}' \
-  -H "Content-Type: application/json" --output explosion.wav
-
-# Campfire
-curl -X POST http://localhost:8765/generate \
-  -d '{"prompt": "crackling campfire with wood popping", "duration": 6}' \
-  -H "Content-Type: application/json" --output campfire.wav
-
-# Rain
-curl -X POST http://localhost:8765/generate \
-  -d '{"prompt": "heavy rain on a rooftop", "duration": 7}' \
-  -H "Content-Type: application/json" --output rain.wav
-
-# Reproducible result with a seed
-curl -X POST http://localhost:8765/generate \
-  -d '{"prompt": "dog barking loudly", "duration": 4, "seed": 42}' \
-  -H "Content-Type: application/json" --output dog.wav
+{"status": "ok", "model": "small-sfx", "device": "cuda", "loaded": true, "idle_seconds": 12, "idle_timeout": 300}
 ```
 
 ## systemd Service (auto-start on boot)
@@ -134,23 +117,18 @@ On systems where CPU and GPU share a unified memory pool, other large models (e.
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `MODEL_NAME` | `small-sfx` | Model variant to load |
+| `PORT` | `8765` | Server port |
 | `IDLE_TIMEOUT` | `300` | Seconds of inactivity before unloading the model from GPU. Set to `0` to disable. |
 
 ### Idle sleep
 
-When `IDLE_TIMEOUT` is set (default 5 minutes), a background task monitors inactivity and unloads the model weights from GPU memory after the timeout, freeing VRAM for other processes. The model reloads automatically on the next request (~8s cold start).
-
-The `/health` endpoint reports current state:
-
-```json
-{"status": "ok", "model": "small-sfx", "device": "cuda", "loaded": false, "idle_seconds": 342, "idle_timeout": 300}
-```
+When `IDLE_TIMEOUT` is set (default 5 minutes), a background thread monitors inactivity and unloads the model weights from GPU memory after the timeout, freeing VRAM for other processes. The model reloads automatically on the next request (~8s cold start).
 
 To override at runtime:
 
 ```bash
-IDLE_TIMEOUT=600 .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765  # 10 min
-IDLE_TIMEOUT=0   .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765  # never unload
+IDLE_TIMEOUT=600 .venv/bin/python main.py  # 10 min
+IDLE_TIMEOUT=0   .venv/bin/python main.py  # never unload
 ```
 
 Or in the systemd unit:
