@@ -1,0 +1,18 @@
+[Unit]
+Description=Stable Audio 3 SFX Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/stable-audio-3-sfx
+ExecStartPre=/bin/sleep 5
+ExecStart=%h/projects/stable-audio-3-sfx/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=120
+StartLimitBurst=3
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,10 @@
+# Install into a project venv with CUDA support:
+#
+#   uv venv --python 3.12 .venv
+#   uv pip install --torch-backend cu130 --python .venv/bin/python torch torchaudio
+#   uv pip install --python .venv/bin/python --no-deps git+https://github.com/Stability-AI/stable-audio-3.git
+#   uv pip install --python .venv/bin/python einops einops-exts soundfile safetensors \
+#       huggingface-hub transformers tqdm numpy packaging fastapi uvicorn pydantic
+#
+# stable-audio-3 pins torch==2.7.1 but works fine with newer versions;
+# --no-deps bypasses that constraint so the CUDA build is preserved.
