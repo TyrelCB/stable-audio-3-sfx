@@ -96,16 +96,16 @@ curl http://localhost:8765/health
 A service unit is included. Install it as a user service:
 
 ```bash
-cp stable-audio-sfx.service ~/.config/systemd/user/
+cp stable-audio-sfx-mcp.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now stable-audio-sfx.service
+systemctl --user enable --now stable-audio-sfx-mcp.service
 ```
 
 Check status and logs:
 
 ```bash
-systemctl --user status stable-audio-sfx.service
-journalctl --user -u stable-audio-sfx.service -f
+systemctl --user status stable-audio-sfx-mcp.service
+journalctl --user -u stable-audio-sfx-mcp.service -f
 ```
 
 ### Note on unified memory systems (NVIDIA Grace Blackwell / Jetson)
