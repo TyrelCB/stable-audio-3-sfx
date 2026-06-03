@@ -40,11 +40,11 @@ huggingface-cli login
 .venv/bin/python main.py
 ```
 
-The model downloads and loads into GPU memory on first startup (~3.4 GB, cached to `~/.cache/huggingface` afterward). Open **http://localhost:8765** for the UI.
+The model downloads and loads into GPU memory on first startup (~3.4 GB, cached to `~/.cache/huggingface` afterward). Open **http://localhost:8766** for the UI.
 
 ## Web UI
 
-The Gradio interface at `http://localhost:8765` provides:
+The Gradio interface at `http://localhost:8766` provides:
 - Prompt text input
 - Duration and Steps sliders
 - Advanced controls (CFG scale, seed, negative prompt)
@@ -55,7 +55,7 @@ The Gradio interface at `http://localhost:8765` provides:
 The service exposes a `generate_sfx` MCP tool at:
 
 ```
-http://localhost:8765/gradio_api/mcp/sse
+http://localhost:8766/gradio_api/mcp
 ```
 
 ### Connecting from Claude Desktop
@@ -66,7 +66,7 @@ Add to `claude_desktop_config.json`:
 {
   "mcpServers": {
     "stable-audio-sfx": {
-      "url": "http://localhost:8765/gradio_api/mcp/sse"
+      "url": "http://localhost:8766/gradio_api/mcp"
     }
   }
 }
@@ -76,7 +76,7 @@ Add to `claude_desktop_config.json`:
 
 The tool schema is available at:
 ```bash
-curl http://localhost:8765/gradio_api/mcp/schema | python3 -m json.tool
+curl http://localhost:8766/gradio_api/mcp/schema | python3 -m json.tool
 ```
 
 The `generate_sfx` tool accepts: `prompt`, `duration`, `steps`, `cfg_scale`, `seed`, `negative_prompt`.
@@ -84,7 +84,7 @@ The `generate_sfx` tool accepts: `prompt`, `duration`, `steps`, `cfg_scale`, `se
 ## Health endpoint
 
 ```bash
-curl http://localhost:8765/health
+curl http://localhost:8766/health
 ```
 
 ```json
@@ -117,7 +117,7 @@ On systems where CPU and GPU share a unified memory pool, other large models (e.
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `MODEL_NAME` | `small-sfx` | Model variant to load |
-| `PORT` | `8765` | Server port |
+| `PORT` | `8766` | Server port |
 | `IDLE_TIMEOUT` | `300` | Seconds of inactivity before unloading the model from GPU. Set to `0` to disable. |
 
 ### Idle sleep

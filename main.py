@@ -13,10 +13,10 @@ Run:
 Env vars:
   MODEL_NAME    model variant to load  (default: small-sfx)
   IDLE_TIMEOUT  seconds idle before GPU unload  (default: 300, 0 = never)
-  PORT          server port  (default: 8765)
+  PORT          server port  (default: 8766)
 
 MCP endpoint:
-  http://localhost:8765/gradio_api/mcp/sse
+  http://localhost:8766/gradio_api/mcp
 """
 
 import os
@@ -35,7 +35,7 @@ from stable_audio_3 import StableAudioModel
 
 MODEL_NAME = os.getenv("MODEL_NAME", "small-sfx")
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "300"))
-PORT = int(os.getenv("PORT", "8765"))
+PORT = int(os.getenv("PORT", "8766"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ---------------------------------------------------------------------------
