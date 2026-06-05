@@ -12,6 +12,7 @@ StartLimitIntervalSec=120
 StartLimitBurst=3
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+Environment=IDLE_TIMEOUT=90
 
 [Install]
 WantedBy=default.target

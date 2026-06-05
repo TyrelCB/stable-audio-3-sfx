@@ -12,68 +12,98 @@ Run:
 
 Env vars:
   MODEL_NAME    model variant to load  (default: small-sfx)
-  IDLE_TIMEOUT  seconds idle before GPU unload  (default: 300, 0 = never)
+  IDLE_TIMEOUT  seconds idle before the model worker is killed, freeing both
+                GPU memory and host RAM  (default: 300, 0 = never)
   PORT          server port  (default: 8766)
+
+The model runs in a separate subprocess (worker.py). On idle it is killed
+outright so the OS reclaims the full torch/CUDA footprint — VRAM *and* the
+~2.5 GB of host RAM the stack pins. It is respawned automatically on the next
+request. The parent web server never imports torch, so it idles at a small,
+constant footprint.
 
 MCP endpoint:
   http://localhost:8766/gradio_api/mcp
 """
 
+import multiprocessing as mp
 import os
+import queue
 import threading
 import time
 from typing import Optional
 
-import gradio as gr
 import numpy as np
-import soundfile as sf
-import torch
-import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from stable_audio_3 import StableAudioModel
+
+import worker
 
 MODEL_NAME = os.getenv("MODEL_NAME", "small-sfx")
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "300"))
 PORT = int(os.getenv("PORT", "8766"))
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ---------------------------------------------------------------------------
-# Model state (module-level for Gradio's functional style)
+# Model worker lifecycle (the model lives in a child process, not here)
 # ---------------------------------------------------------------------------
 
-_model: Optional[StableAudioModel] = None
+# "spawn" gives the child a clean interpreter — it imports this module as
+# __mp_main__, so nothing under `if __name__ == "__main__"` runs in the child.
+_ctx = mp.get_context("spawn")
+
+_proc: Optional[mp.context.SpawnProcess] = None
+_req_q: Optional[mp.Queue] = None
+_resp_q: Optional[mp.Queue] = None
+_device: Optional[str] = None
 _lock = threading.Lock()
 _last_used = time.monotonic()
 
 
-def _load_model() -> StableAudioModel:
-    for attempt in range(5):
-        try:
-            torch.cuda.empty_cache()
-            return StableAudioModel.from_pretrained(MODEL_NAME, device=DEVICE)
-        except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
-            if "out of memory" in str(e).lower() and DEVICE == "cuda" and attempt < 4:
-                wait = 10 * (attempt + 1)
-                print(f"CUDA OOM on attempt {attempt + 1}, retrying in {wait}s...")
-                torch.cuda.empty_cache()
-                time.sleep(wait)
-            else:
-                raise
+def _ensure_worker() -> None:
+    """Spawn the model worker if it isn't running. Caller must hold _lock."""
+    global _proc, _req_q, _resp_q, _device
+    if _proc is not None and _proc.is_alive():
+        return
+    _req_q = _ctx.Queue()
+    _resp_q = _ctx.Queue()
+    _proc = _ctx.Process(
+        target=worker.run_worker,
+        args=(_req_q, _resp_q, MODEL_NAME),
+        daemon=True,
+    )
+    _proc.start()
+    print("Model worker starting — loading model...")
+    status, payload = _resp_q.get()   # blocks until the model loads or fails
+    if status == "ready":
+        _device = payload
+        print(f"Model worker ready on {_device}.")
+    else:
+        _stop_worker()
+        raise RuntimeError(f"Model worker failed to load: {payload}")
+
+
+def _stop_worker() -> None:
+    """Kill the worker, reclaiming its GPU + host memory. Caller must hold _lock."""
+    global _proc, _req_q, _resp_q
+    if _proc is not None:
+        _proc.terminate()
+        _proc.join(timeout=10)
+        if _proc.is_alive():
+            _proc.kill()
+            _proc.join()
+    _proc = None
+    _req_q = None
+    _resp_q = None
 
 
 def _idle_worker() -> None:
-    global _model
     while True:
         time.sleep(30)
         with _lock:
-            if _model is None or IDLE_TIMEOUT <= 0:
+            if _proc is None or IDLE_TIMEOUT <= 0:
                 continue
             idle = time.monotonic() - _last_used
             if idle >= IDLE_TIMEOUT:
-                _model = None
-                torch.cuda.empty_cache()
-                print(f"Model unloaded after {idle:.0f}s idle — GPU memory freed.")
+                _stop_worker()
+                print(f"Worker killed after {idle:.0f}s idle — GPU + RAM freed.")
 
 
 # ---------------------------------------------------------------------------
@@ -101,106 +131,104 @@ def generate_sfx(
     Returns:
         Tuple of (sample_rate, stereo_audio_array) ready for playback or download.
     """
-    global _model, _last_used
+    global _last_used
 
     with _lock:
-        if _model is None:
-            print("Model not loaded — loading now...")
-            _model = _load_model()
+        _ensure_worker()
+        _last_used = time.monotonic()
+        _req_q.put({
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "duration": duration,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "seed": seed,
+        })
+
+        # Wait for the result, but don't hang forever if the worker dies.
+        status, payload = "error", "Worker process died during generation."
+        while True:
+            try:
+                status, payload = _resp_q.get(timeout=5)
+                break
+            except queue.Empty:
+                if _proc is None or not _proc.is_alive():
+                    _stop_worker()
+                    break
         _last_used = time.monotonic()
 
-        audio = _model.generate(
-            prompt=prompt,
-            negative_prompt=negative_prompt or None,
-            duration=duration,
-            steps=steps,
-            cfg_scale=cfg_scale,
-            seed=seed,
+    if status != "ok":
+        raise RuntimeError(payload)
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint — build the Gradio UI + FastAPI app and serve.
+# Kept under __main__ so the spawned worker never imports gradio/uvicorn.
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    import gradio as gr
+    import uvicorn
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
+
+    with gr.Blocks(title="Stable Audio 3 SFX") as demo:
+        gr.Markdown("# Stable Audio 3 SFX")
+        gr.Markdown("Generate stereo sound effects from text prompts using the Stable Audio 3 diffusion model.")
+
+        prompt = gr.Textbox(
+            label="Prompt",
+            placeholder='thunder clap with distant rumble',
+            lines=2,
+        )
+        with gr.Row():
+            duration = gr.Slider(1, 60, value=5, step=0.5, label="Duration (s)")
+            steps    = gr.Slider(1, 50, value=8, step=1,   label="Steps")
+
+        with gr.Accordion("Advanced", open=False):
+            with gr.Row():
+                cfg_scale       = gr.Slider(0, 10, value=1.0, step=0.1, label="CFG Scale")
+                seed            = gr.Number(value=-1, label="Seed  (−1 = random)", precision=0)
+                negative_prompt = gr.Textbox(label="Negative Prompt", placeholder="optional")
+
+        btn       = gr.Button("Generate", variant="primary")
+        audio_out = gr.Audio(label="Output", type="numpy")
+
+        btn.click(
+            fn=generate_sfx,
+            inputs=[prompt, duration, steps, cfg_scale, seed, negative_prompt],
+            outputs=audio_out,
         )
 
-    # generate() → (batch, channels, samples) float32
-    if isinstance(audio, torch.Tensor):
-        audio = audio.cpu().float().numpy()
-    audio = np.asarray(audio, dtype=np.float32)
-    if audio.ndim == 3:
-        audio = audio[0]        # (channels, samples)
-    if audio.ndim == 2:
-        audio = audio.T         # (samples, channels) for Gradio/soundfile
+    api = FastAPI()
 
-    inner = getattr(_model, "model", None)
-    sample_rate = getattr(inner, "sample_rate", 44100)
+    @api.get("/health")
+    def health():
+        loaded = _proc is not None and _proc.is_alive()
+        idle = time.monotonic() - _last_used
+        return JSONResponse({
+            "status": "ok",
+            "model": MODEL_NAME,
+            "device": _device or "unknown",
+            "loaded": loaded,
+            "idle_seconds": round(idle),
+            "idle_timeout": IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else "disabled",
+        })
 
-    return (sample_rate, audio)
-
-
-# ---------------------------------------------------------------------------
-# Gradio UI
-# ---------------------------------------------------------------------------
-
-with gr.Blocks(title="Stable Audio 3 SFX") as demo:
-    gr.Markdown("# Stable Audio 3 SFX")
-    gr.Markdown("Generate stereo sound effects from text prompts using the Stable Audio 3 diffusion model.")
-
-    prompt = gr.Textbox(
-        label="Prompt",
-        placeholder='thunder clap with distant rumble',
-        lines=2,
-    )
-    with gr.Row():
-        duration = gr.Slider(1, 60, value=5, step=0.5, label="Duration (s)")
-        steps    = gr.Slider(1, 50, value=8, step=1,   label="Steps")
-
-    with gr.Accordion("Advanced", open=False):
-        with gr.Row():
-            cfg_scale       = gr.Slider(0, 10, value=1.0, step=0.1, label="CFG Scale")
-            seed            = gr.Number(value=-1, label="Seed  (−1 = random)", precision=0)
-            negative_prompt = gr.Textbox(label="Negative Prompt", placeholder="optional")
-
-    btn       = gr.Button("Generate", variant="primary")
-    audio_out = gr.Audio(label="Output", type="numpy")
-
-    btn.click(
-        fn=generate_sfx,
-        inputs=[prompt, duration, steps, cfg_scale, seed, negative_prompt],
-        outputs=audio_out,
+    app = gr.mount_gradio_app(
+        api,
+        demo,
+        path="/",
+        mcp_server=True,
+        theme=gr.themes.Soft(),
     )
 
+    threading.Thread(target=_idle_worker, daemon=True).start()
+    with _lock:
+        _ensure_worker()   # pre-warm so the first request is fast
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
 
-# ---------------------------------------------------------------------------
-# FastAPI app — health endpoint + Gradio mounted at /
-# ---------------------------------------------------------------------------
-
-api = FastAPI()
-
-
-@api.get("/health")
-def health():
-    loaded = _model is not None
-    idle = time.monotonic() - _last_used
-    return JSONResponse({
-        "status": "ok",
-        "model": MODEL_NAME,
-        "device": DEVICE,
-        "loaded": loaded,
-        "idle_seconds": round(idle),
-        "idle_timeout": IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else "disabled",
-    })
-
-
-app = gr.mount_gradio_app(
-    api,
-    demo,
-    path="/",
-    mcp_server=True,
-    theme=gr.themes.Soft(),
-)
-
-
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    threading.Thread(target=_idle_worker, daemon=True).start()
-    _model = _load_model()
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    main()
