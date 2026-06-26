@@ -222,6 +222,7 @@ def main() -> None:
         path="/",
         mcp_server=True,
         theme=gr.themes.Soft(),
+        pwa=True,
     )
 
     threading.Thread(target=_idle_worker, daemon=True).start()
